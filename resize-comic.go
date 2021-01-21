@@ -1,8 +1,8 @@
 package main
 
+import "C"
 import (
 	"archive/tar"
-	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -12,7 +12,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
+	"github.com/cjun714/go-image-stb/stb"
 	"github.com/cjun714/go-image/webp"
 	"github.com/gen2brain/go-unarr"
 )
@@ -21,7 +23,7 @@ func init() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 }
 
-var quality = 80
+var quality = 90
 
 func main() {
 	src := os.Args[1]
@@ -98,7 +100,7 @@ func pack(src, targetDir string) error {
 
 	baseName := filepath.Base(src)
 	ext := filepath.Ext(baseName)
-	newName := strings.TrimSuffix(baseName, ext) + ".cbt"
+	newName := strings.TrimSuffix(baseName, ext) + "-resized" + ".cbt"
 	target := filepath.Join(targetDir, newName)
 
 	return packArc(src, target)
@@ -121,7 +123,10 @@ func packArc(src, target string) error {
 
 	var lock sync.Mutex
 	var wg sync.WaitGroup
-	for ; e == nil; e = ar.Entry() {
+	for e == nil {
+		if e = ar.Entry(); e != nil {
+			break
+		}
 		name := filepath.Base(ar.Name())
 
 		// TODO unarr lib ignore dir entry in archive file
@@ -132,42 +137,46 @@ func packArc(src, target string) error {
 		// TODO unrar doesn't checksum
 		data, e := ar.ReadAll()
 		if e != nil {
-			fmt.Printf("read file %s failed in %s, error:%s\n", name, src, e)
+			fmt.Printf("extract file failed, file: %s, error: %s\n", name, e)
 			continue
 		}
 
 		wg.Add(1)
-		go func(fname string, modtime time.Time, content []byte) {
+		go func(fname string, modtime time.Time, fdata []byte) {
 			defer wg.Done()
 
-			cfg, e := webp.ConfigPreset(webp.PRESET_DRAWING, quality)
+			pixPtr, w, h, comps, e := stb.LoadBytes(fdata)
 			if e != nil {
-				fmt.Printf("config WebP encoder failed, error:%s\n", e)
+				fmt.Printf("stb decode failed, file: %s", fname)
 				return
 			}
-			cfg.SetResizeHeight(1440)
+			defer stb.Free(pixPtr)
+			pix := C.GoBytes(unsafe.Pointer(pixPtr), C.int(w*h*comps))
 
+			cfg := webp.NewConfig(webp.SET_DRAWING, quality)
+			if h > 1440 {
+				cfg.SetResize(0, 1440)
+			}
 			var buf bytes.Buffer
-			if e := webp.EncodeBytes(bufio.NewWriter(&buf), content, cfg); e != nil {
-				fmt.Printf("encode webp failed, file:%s, name:%s, error:%s\n",
-					src, fname, e)
+			if e := webp.EncodeBytes(&buf, pix, w, h, comps, cfg); e != nil {
+				fmt.Printf("encode webp failed, file: %s, error: %s\n", fname, e)
 			}
 
 			fname = replaceSuffix(fname, ".webp")
-			h := &tar.Header{
+			hd := &tar.Header{
 				Name:    fname,
 				Mode:    int64(0666),
 				Size:    int64(buf.Len()),
 				ModTime: modtime,
 			}
 			lock.Lock()
-			if e := wr.WriteHeader(h); e != nil {
+			if e := wr.WriteHeader(hd); e != nil {
 				fmt.Printf("write .cbt header failed, file:%s, name:%s, error:%s\n",
 					src, fname, e)
 				return
 			}
 			if _, e := wr.Write(buf.Bytes()); e != nil {
-				fmt.Printf("write .cbt content failed, file:%s, name:%s, error:%s\n",
+				fmt.Printf("write .cbt data failed, file:%s, name:%s, error:%s\n",
 					src, fname, e)
 				return
 			}
