@@ -9,11 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unsafe"
 
+	"github.com/cjun714/glog/log"
 	"github.com/cjun714/go-image-stb/stb"
 	"github.com/cjun714/go-image/webp"
 	"github.com/gen2brain/go-unarr"
@@ -23,7 +25,8 @@ func init() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 }
 
-var quality = 90
+var quality = 85
+var height = 1440
 
 func main() {
 	src := os.Args[1]
@@ -33,6 +36,22 @@ func main() {
 		targetDir = os.Args[2]
 	}
 
+	if len(os.Args) >= 4 {
+		q, e := strconv.Atoi(os.Args[3])
+		if e == nil {
+			quality = q
+		}
+	}
+
+	if len(os.Args) >= 5 {
+		h, e := strconv.Atoi(os.Args[4])
+		if e == nil {
+			height = h
+		}
+	}
+
+	log.I("quality:", quality, " | height:", height)
+
 	start := time.Now()
 
 	if fileExist(src) { // if src is file
@@ -40,7 +59,7 @@ func main() {
 			panic(e)
 		}
 		duration := time.Since(start)
-		fmt.Println("cost: ", duration)
+		log.I("cost: ", duration)
 
 		return
 	}
@@ -81,14 +100,14 @@ func main() {
 		rel, _ := filepath.Rel(src, filepath.Dir(fPath))
 		newDir := filepath.Join(targetDir, rel)
 		if e := pack(fPath, newDir); e != nil {
-			fmt.Printf("convert failed, file: %s, error: %s\n", fPath, e)
+			log.E("convert failed:", fPath, " , error:", e)
 		}
 
 		return nil
 	})
 
 	duration := time.Since(start)
-	fmt.Println("cost: ", duration)
+	log.I("cost: ", duration)
 
 	if e != nil {
 		panic(e)
@@ -96,7 +115,7 @@ func main() {
 }
 
 func pack(src, targetDir string) error {
-	fmt.Println("resize:", src)
+	log.I("resize:", src)
 
 	baseName := filepath.Base(src)
 	ext := filepath.Ext(baseName)
@@ -137,7 +156,7 @@ func packArc(src, target string) error {
 		// TODO unrar doesn't checksum
 		data, e := ar.ReadAll()
 		if e != nil {
-			fmt.Printf("extract file failed, file: %s, error: %s\n", name, e)
+			log.E("extract file failed:", name, ", error:", e)
 			continue
 		}
 
@@ -147,19 +166,19 @@ func packArc(src, target string) error {
 
 			pixPtr, w, h, comps, e := stb.LoadBytes(fdata)
 			if e != nil {
-				fmt.Printf("stb decode failed, file: %s", fname)
+				log.E("stb decode failed:", fname)
 				return
 			}
 			defer stb.Free(pixPtr)
 			pix := C.GoBytes(unsafe.Pointer(pixPtr), C.int(w*h*comps))
 
 			cfg := webp.NewConfig(webp.SET_DRAWING, quality)
-			if h > 1440 {
-				cfg.SetResize(0, 1440)
+			if h > height {
+				cfg.SetResize(0, height)
 			}
 			var buf bytes.Buffer
 			if e := webp.EncodeBytes(&buf, pix, w, h, comps, cfg); e != nil {
-				fmt.Printf("encode webp failed, file: %s, error: %s\n", fname, e)
+				log.E("encode webp failed:", fname, " , error:", e)
 			}
 
 			fname = replaceSuffix(fname, ".webp")
@@ -171,13 +190,11 @@ func packArc(src, target string) error {
 			}
 			lock.Lock()
 			if e := wr.WriteHeader(hd); e != nil {
-				fmt.Printf("write .cbt header failed, file:%s, name:%s, error:%s\n",
-					src, fname, e)
+				log.E("write header failed:", src, ", name:", fname, ", error:", e)
 				return
 			}
 			if _, e := wr.Write(buf.Bytes()); e != nil {
-				fmt.Printf("write .cbt data failed, file:%s, name:%s, error:%s\n",
-					src, fname, e)
+				log.E("write data failed:", src, ", name:", fname, ", error:", e)
 				return
 			}
 			lock.Unlock()
