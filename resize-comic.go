@@ -119,7 +119,7 @@ func pack(src, targetDir string) error {
 
 	baseName := filepath.Base(src)
 	ext := filepath.Ext(baseName)
-	newName := strings.TrimSuffix(baseName, ext) + "-resized" + ".cbt"
+	newName := strings.TrimSuffix(baseName, ext) + "[resized]" + ".cbt"
 	target := filepath.Join(targetDir, newName)
 
 	return packArc(src, target)
