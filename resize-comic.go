@@ -126,7 +126,13 @@ func pack(src, targetDir string) error {
 }
 
 func packArc(src, target string) error {
-	ar, e := unarr.NewArchive(src)
+	sfile, e := os.Open(src)
+	if e != nil {
+		return e
+	}
+	defer sfile.Close()
+
+	ar, e := unarr.NewArchiveFromReader(sfile)
 	if e != nil {
 		return e
 	}
