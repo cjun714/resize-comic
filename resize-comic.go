@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -114,6 +115,50 @@ func main() {
 	}
 }
 
+type zipData struct {
+	name    string
+	data    []byte
+	modTime time.Time
+}
+
+func readArc(src string) ([]zipData, error) {
+	byts, e := ioutil.ReadFile(src)
+	if e != nil {
+		return nil, e
+	}
+	br := bytes.NewBuffer(byts)
+
+	fileList := make([]zipData, 0, 1)
+	ar, e := unarr.NewArchiveFromReader(br)
+	if e != nil {
+		return nil, e
+	}
+
+	for e == nil {
+		if e = ar.Entry(); e != nil {
+			if e != io.EOF {
+				log.E(e)
+				log.E("read entry failed, entry name:", ar.Name())
+			}
+			break
+		}
+		name := ar.Name()
+		modTime := ar.ModTime()
+
+		data, e := ar.ReadAll()
+		if e != nil {
+			return nil, e
+		}
+		fileList = append(fileList, zipData{name, data, modTime})
+	}
+
+	if e != nil && e != io.EOF {
+		return nil, e
+	}
+
+	return fileList, nil
+}
+
 func pack(src, targetDir string) error {
 	log.I("resize:", src)
 
@@ -126,56 +171,45 @@ func pack(src, targetDir string) error {
 }
 
 func packArc(src, target string) error {
-	sfile, e := os.Open(src)
+	list, e := readArc(src)
 	if e != nil {
 		return e
 	}
-	defer sfile.Close()
-
-	ar, e := unarr.NewArchiveFromReader(sfile)
-	if e != nil {
-		return e
-	}
-	defer ar.Close()
 
 	f, e := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0666)
 	if e != nil {
 		return e
 	}
+	defer f.Close()
 
 	wr := tar.NewWriter(f)
 	defer wr.Close()
 
 	var lock sync.Mutex
 	var wg sync.WaitGroup
-	for e == nil {
-		if e = ar.Entry(); e != nil {
-			break
-		}
-		name := filepath.Base(ar.Name())
 
-		// TODO unarr lib ignore dir entry in archive file
-		if !isImage(name) {
-			continue
-		}
-
-		// TODO unrar doesn't checksum
-		data, e := ar.ReadAll()
-		if e != nil {
-			log.E("extract file failed:", name, ", error:", e)
+	for _, file := range list {
+		if !isImage(file.name) {
+			log.I("skip:", file.name)
 			continue
 		}
 
 		wg.Add(1)
-		go func(fname string, modtime time.Time, fdata []byte) {
+		go func(f zipData) {
 			defer wg.Done()
 
-			pixPtr, w, h, comps, e := stb.LoadBytes(fdata)
-			if e != nil {
-				log.E("stb decode failed:", fname)
-				return
+			var pixPtr *uint8
+			var w, h, comps int
+			if isWebp(f.name) {
+				// TODO
+			} else {
+				pixPtr, w, h, comps, e = stb.LoadBytes(f.data)
+				if e != nil {
+					log.E("stb decode failed:", f.name)
+					return
+				}
+				defer stb.Free(pixPtr)
 			}
-			defer stb.Free(pixPtr)
 			pix := C.GoBytes(unsafe.Pointer(pixPtr), C.int(w*h*comps))
 
 			cfg := webp.NewConfig(webp.SET_DRAWING, quality)
@@ -184,33 +218,30 @@ func packArc(src, target string) error {
 			}
 			var buf bytes.Buffer
 			if e := webp.EncodeBytes(&buf, pix, w, h, comps, cfg); e != nil {
-				log.E("encode webp failed:", fname, " , error:", e)
+				log.E("encode webp failed:", f.name, " , error:", e)
 			}
 
-			fname = replaceSuffix(fname, ".webp")
-			hd := &tar.Header{
+			fname := replaceSuffix(f.name, ".webp")
+			head := &tar.Header{
 				Name:    fname,
 				Mode:    int64(0666),
 				Size:    int64(buf.Len()),
-				ModTime: modtime,
+				ModTime: f.modTime,
 			}
+
 			lock.Lock()
-			if e := wr.WriteHeader(hd); e != nil {
-				log.E("write header failed:", src, ", name:", fname, ", error:", e)
+			if e := wr.WriteHeader(head); e != nil {
+				log.E("write header failed:", src, ", name:", f.name, ", error:", e)
 				return
 			}
 			if _, e := wr.Write(buf.Bytes()); e != nil {
-				log.E("write data failed:", src, ", name:", fname, ", error:", e)
+				log.E("write data failed:", src, ", name:", f.name, ", error:", e)
 				return
 			}
 			lock.Unlock()
-		}(name, ar.ModTime(), data)
+		}(file)
 	}
 	wg.Wait()
-
-	if e != nil && e != io.EOF {
-		return e
-	}
 
 	return nil
 }
@@ -256,4 +287,8 @@ func replaceSuffix(str, ext string) string {
 	oldExt := filepath.Ext(str)
 	str = strings.TrimSuffix(str, oldExt)
 	return str + ext
+}
+
+func isWebp(name string) bool {
+	return false
 }
